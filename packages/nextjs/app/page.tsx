@@ -2,22 +2,15 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { Address } from "@scaffold-ui/components";
 import type { NextPage } from "next";
 import { formatEther } from "viem";
-import { useAccount } from "wagmi";
-import { Address } from "@scaffold-ui/components";
-import { useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
-import {
-  JOB_STATUS_LABELS,
-  JOB_STATUS_COLORS,
-  formatTimeRemaining,
-} from "~~/utils/bountyBoard";
+import { useScaffoldReadContract } from "~~/hooks/scaffold-eth";
+import { JOB_STATUS_COLORS, JOB_STATUS_LABELS, formatTimeRemaining } from "~~/utils/bountyBoard";
 
 // ─── Job Card Component ───
 const JobCard = ({ jobId }: { jobId: number }) => {
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
-  const [agentIdInput, setAgentIdInput] = useState("");
-  const [showClaimInput, setShowClaimInput] = useState(false);
 
   // Live clock for auction price
   useEffect(() => {
@@ -43,10 +36,6 @@ const JobCard = ({ jobId }: { jobId: number }) => {
     args: [BigInt(jobId)],
   });
 
-  const { writeContractAsync: writeBoard, isMining: isClaiming } = useScaffoldWriteContract({
-    contractName: "AgentBountyBoard",
-  });
-
   if (!jobCore) return null;
 
   const [poster, description, minPrice, maxPrice, auctionStart, auctionDuration, workDeadline, status] = jobCore;
@@ -56,25 +45,14 @@ const JobCard = ({ jobId }: { jobId: number }) => {
   const auctionTimeRemaining = auctionEnd - now;
   const isAuctionActive = statusNum === 0 && auctionTimeRemaining > 0;
 
-  const handleClaim = async () => {
-    if (!agentIdInput) return;
-    try {
-      await writeContractAsync("claimJob", BigInt(jobId), BigInt(agentIdInput));
-    } catch (e) {
-      console.error("Claim failed:", e);
-    }
-  };
-
   return (
     <Link href={`/job/${jobId}`}>
-      <div className="card bg-base-300 shadow-xl hover:shadow-2xl transition-all cursor-pointer">
+      <div className="card bg-base-300 shadow-xl hover:shadow-2xl transition-all cursor-pointer h-full">
         <div className="card-body p-5">
           {/* Header row */}
           <div className="flex justify-between items-start">
             <h3 className="card-title text-sm font-bold">Job #{jobId}</h3>
-            <span className={`badge ${JOB_STATUS_COLORS[statusNum]} badge-sm`}>
-              {JOB_STATUS_LABELS[statusNum]}
-            </span>
+            <span className={`badge ${JOB_STATUS_COLORS[statusNum]} badge-sm`}>{JOB_STATUS_LABELS[statusNum]}</span>
           </div>
 
           {/* Description */}
@@ -93,14 +71,10 @@ const JobCard = ({ jobId }: { jobId: number }) => {
                   <span>→</span>
                   <span>Min: {parseFloat(formatEther(minPrice)).toFixed(0)}</span>
                 </div>
-                <div className="mt-2 text-xs">
-                  ⏱ {formatTimeRemaining(auctionTimeRemaining)} remaining
-                </div>
+                <div className="mt-2 text-xs">⏱ {formatTimeRemaining(auctionTimeRemaining)} remaining</div>
               </div>
             ) : statusNum === 0 ? (
-              <div className="bg-base-100 rounded-lg p-3 text-sm opacity-60">
-                Auction ended — awaiting expiry
-              </div>
+              <div className="bg-base-100 rounded-lg p-3 text-sm opacity-60">Auction ended — awaiting expiry</div>
             ) : (
               <div className="bg-base-100 rounded-lg p-3">
                 <div className="text-xs opacity-60 mb-1">Price Range</div>
@@ -117,9 +91,7 @@ const JobCard = ({ jobId }: { jobId: number }) => {
           </div>
 
           {/* Work deadline */}
-          <div className="text-xs opacity-50 mt-1">
-            Work deadline: {Number(workDeadline)}s after claim
-          </div>
+          <div className="text-xs opacity-50 mt-1">Work deadline: {formatTimeRemaining(Number(workDeadline))}</div>
 
           {/* Poster */}
           <div className="flex items-center gap-1 mt-1 text-xs opacity-50">
@@ -143,8 +115,8 @@ const Home: NextPage = () => {
 
   const totalJobs = jobCount ? Number(jobCount) : 0;
 
-  // Build job IDs array
-  const jobIds = Array.from({ length: totalJobs }, (_, i) => i);
+  // Build job IDs array (reverse order — newest first)
+  const jobIds = Array.from({ length: totalJobs }, (_, i) => totalJobs - 1 - i);
 
   return (
     <div className="flex flex-col grow">
@@ -157,8 +129,8 @@ const Home: NextPage = () => {
               <div className="stat-value text-2xl">{totalJobs}</div>
             </div>
             <div className="stat place-items-center py-2">
-              <div className="stat-title text-xs">Status</div>
-              <div className="stat-value text-2xl text-success">Live</div>
+              <div className="stat-title text-xs">Auction Type</div>
+              <div className="stat-value text-lg">🇳🇱 Dutch</div>
             </div>
             <div className="stat place-items-center py-2">
               <div className="stat-title text-xs">Token</div>
@@ -172,12 +144,8 @@ const Home: NextPage = () => {
       <div className="max-w-7xl mx-auto px-6 py-6 w-full grow">
         {/* Filter Tabs */}
         <div className="tabs tabs-boxed mb-6 bg-base-300 inline-flex">
-          {(["all", "open", "claimed", "completed"] as const).map((tab) => (
-            <button
-              key={tab}
-              className={`tab ${filter === tab ? "tab-active" : ""}`}
-              onClick={() => setFilter(tab)}
-            >
+          {(["all", "open", "claimed", "completed"] as const).map(tab => (
+            <button key={tab} className={`tab ${filter === tab ? "tab-active" : ""}`} onClick={() => setFilter(tab)}>
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
@@ -194,7 +162,7 @@ const Home: NextPage = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {jobIds.map((id) => (
+            {jobIds.map(id => (
               <FilteredJobCard key={id} jobId={id} filter={filter} />
             ))}
           </div>
@@ -205,13 +173,7 @@ const Home: NextPage = () => {
 };
 
 // ─── Filtered Job Card (handles filtering) ───
-const FilteredJobCard = ({
-  jobId,
-  filter,
-}: {
-  jobId: number;
-  filter: "all" | "open" | "claimed" | "completed";
-}) => {
+const FilteredJobCard = ({ jobId, filter }: { jobId: number; filter: "all" | "open" | "claimed" | "completed" }) => {
   const { data: jobCore } = useScaffoldReadContract({
     contractName: "AgentBountyBoard",
     functionName: "getJobCore",
