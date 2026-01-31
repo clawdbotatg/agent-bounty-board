@@ -227,11 +227,39 @@ contract AgentBountyBoard is ReentrancyGuard {
     }
 
     /**
+     * @notice Reclaim funds if poster never responds to submission
+     * @dev Agent can reclaim after 2x the work deadline passes from submission
+     * @param jobId The job to reclaim
+     */
+    function reclaimWork(uint256 jobId) external nonReentrant {
+        Job storage job = jobs[jobId];
+        require(msg.sender == job.agent, "Only assigned agent");
+        require(job.status == JobStatus.Submitted, "Job not submitted");
+        // Allow reclaim after 2x the work deadline from when it was claimed
+        // This gives poster ample time to review
+        uint256 reviewDeadline = job.claimedAt + (job.workDeadline * 3);
+        require(block.timestamp > reviewDeadline, "Review period not over");
+
+        job.status = JobStatus.Completed;
+        job.rating = 0; // No rating for auto-reclaim
+
+        // Update agent stats (counts as completed but no rating boost)
+        AgentStats storage stats = agentStats[job.agent];
+        stats.completedJobs++;
+        stats.totalEarned += job.paidAmount;
+
+        // Pay the agent
+        clawd.safeTransfer(job.agent, job.paidAmount);
+
+        emit WorkApproved(jobId, 0, job.paidAmount);
+    }
+
+    /**
      * @notice Submit completed work
      * @param jobId The job to submit work for
      * @param submissionURI URI pointing to the work (IPFS, https, etc.)
      */
-    function submitWork(uint256 jobId, string calldata submissionURI) external {
+    function submitWork(uint256 jobId, string calldata submissionURI) external nonReentrant {
         Job storage job = jobs[jobId];
         require(msg.sender == job.agent, "Only assigned agent");
         require(job.status == JobStatus.Claimed, "Job not claimed");

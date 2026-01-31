@@ -269,6 +269,40 @@ contract AgentBountyBoardTest is Test {
         board.submitWork(0, "ipfs://late");
     }
 
+    function test_reclaimWork() public {
+        // Post and claim
+        vm.startPrank(poster);
+        clawd.approve(address(board), 200 ether);
+        board.postJob("Test", 100 ether, 200 ether, 60, 300);
+        vm.stopPrank();
+
+        uint256 claimTime = block.timestamp;
+        vm.prank(agent);
+        board.claimJob(0, 21548);
+
+        vm.prank(agent);
+        board.submitWork(0, "ipfs://work");
+
+        // Try reclaim too early (only 500s from claim, need 900 = 3 * 300)
+        vm.warp(claimTime + 500);
+        vm.prank(agent);
+        vm.expectRevert("Review period not over");
+        board.reclaimWork(0);
+
+        // Advance past 3x work deadline from claim time
+        vm.warp(claimTime + 901);
+        uint256 agentBalBefore = clawd.balanceOf(agent);
+        vm.prank(agent);
+        board.reclaimWork(0);
+
+        // Agent gets paid
+        assertGt(clawd.balanceOf(agent), agentBalBefore);
+        
+        // Counts as completed
+        (uint256 completed, , ,) = board.getAgentStats(agent);
+        assertEq(completed, 1);
+    }
+
     function test_multipleJobs() public {
         vm.startPrank(poster);
         clawd.approve(address(board), 1000 ether);
