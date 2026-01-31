@@ -1,0 +1,250 @@
+#!/usr/bin/env node
+/**
+ * worker.mjs — AI Agent that watches for jobs and completes them
+ * 
+ * Usage:
+ *   node scripts/worker.mjs --agent-id 21548
+ * 
+ * This script:
+ * 1. Watches the AgentBountyBoard for new open jobs
+ * 2. Evaluates if it can do the job (keyword matching)
+ * 3. Waits for price to be acceptable, then claims
+ * 4. Does the work (image generation, research, etc.)
+ * 5. Submits the result
+ * 
+ * Environment:
+ *   PRIVATE_KEY — agent's wallet private key
+ *   RPC_URL — Base RPC (default: http://127.0.0.1:8545)
+ *   BOARD_ADDRESS — AgentBountyBoard contract address
+ */
+
+import { createWalletClient, createPublicClient, http, parseEther, formatEther, parseAbi } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { foundry, base } from "viem/chains";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
+
+// ═══════════════════════════════════════════
+//           CONFIGURATION
+// ═══════════════════════════════════════════
+
+const PRIVATE_KEY = process.env.PRIVATE_KEY || "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"; // Anvil #1
+const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
+const BOARD_ADDRESS = process.env.BOARD_ADDRESS || "0x25d23b63f166ec74b87b40cbcc5548d29576c56c";
+const CLAWD_ADDRESS = "0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07";
+const AGENT_ID = BigInt(process.argv.includes("--agent-id") ? process.argv[process.argv.indexOf("--agent-id") + 1] : "21548");
+
+// Max price willing to claim at (as fraction of maxPrice)
+const MAX_PRICE_FRACTION = 0.8; // Claim if price is below 80% of maxPrice
+
+// ═══════════════════════════════════════════
+//              CONTRACT ABIs
+// ═══════════════════════════════════════════
+
+const BOARD_ABI = parseAbi([
+  "function claimJob(uint256 jobId, uint256 agentId)",
+  "function submitWork(uint256 jobId, string submissionURI)",
+  "function getJobCount() view returns (uint256)",
+  "function getCurrentPrice(uint256 jobId) view returns (uint256)",
+  "function getJobCore(uint256 jobId) view returns (address poster, string description, uint256 minPrice, uint256 maxPrice, uint256 auctionStart, uint256 auctionDuration, uint256 workDeadline, uint8 status)",
+  "function getJobAgent(uint256 jobId) view returns (address agent, uint256 agentId, uint256 claimedAt, string submissionURI, uint256 paidAmount, uint8 rating)",
+  "event JobPosted(uint256 indexed jobId, address indexed poster, string description, uint256 minPrice, uint256 maxPrice, uint256 auctionDuration, uint256 workDeadline)",
+]);
+
+// ═══════════════════════════════════════════
+//         JOB EXECUTION ENGINE
+// ═══════════════════════════════════════════
+
+/**
+ * Evaluate if we can do a job based on description keywords
+ */
+function canDoJob(description) {
+  const desc = description.toLowerCase();
+  const capabilities = [
+    "image", "avatar", "generate", "create", "design",
+    "research", "analyze", "summarize", "write",
+    "download", "fetch", "scrape",
+    "convert", "transform", "process"
+  ];
+  return capabilities.some(kw => desc.includes(kw));
+}
+
+/**
+ * Execute a job and return a submission URI
+ * This is where the actual work happens — images, research, etc.
+ */
+async function executeJob(jobId, description) {
+  const desc = description.toLowerCase();
+  const outputDir = join(process.cwd(), "scripts", "output");
+  mkdirSync(outputDir, { recursive: true });
+
+  if (desc.includes("image") || desc.includes("avatar") || desc.includes("generate")) {
+    // Generate a simple SVG avatar as proof of concept
+    const colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD", "#98D8C8"];
+    const bgColor = colors[Number(jobId) % colors.length];
+    const fgColor = colors[(Number(jobId) + 3) % colors.length];
+    
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <rect width="400" height="400" fill="${bgColor}" rx="40"/>
+  <circle cx="200" cy="160" r="80" fill="${fgColor}" opacity="0.8"/>
+  <circle cx="170" cy="145" r="12" fill="white"/>
+  <circle cx="230" cy="145" r="12" fill="white"/>
+  <circle cx="170" cy="145" r="6" fill="#333"/>
+  <circle cx="230" cy="145" r="6" fill="#333"/>
+  <path d="M 170 185 Q 200 215 230 185" stroke="#333" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <rect x="120" y="260" width="160" height="120" fill="${fgColor}" opacity="0.6" rx="20"/>
+  <text x="200" y="340" font-family="monospace" font-size="14" fill="white" text-anchor="middle">Agent #${jobId}</text>
+  <text x="200" y="390" font-family="monospace" font-size="10" fill="white" text-anchor="middle" opacity="0.7">Generated by Worker</text>
+</svg>`;
+
+    const filename = `job-${jobId}-avatar.svg`;
+    const filepath = join(outputDir, filename);
+    writeFileSync(filepath, svg);
+    console.log(`   🎨 Generated avatar: ${filepath}`);
+    
+    // In production, upload to IPFS. For demo, use a data URI
+    const base64 = Buffer.from(svg).toString("base64");
+    return `data:image/svg+xml;base64,${base64}`;
+  }
+
+  if (desc.includes("research") || desc.includes("analyze") || desc.includes("summarize")) {
+    const report = {
+      jobId: Number(jobId),
+      type: "research",
+      description: description,
+      completedAt: new Date().toISOString(),
+      findings: [
+        "Analysis completed based on available data",
+        "Key insights extracted and summarized",
+        "Recommendations provided below"
+      ],
+      summary: `Research completed for job #${jobId}: "${description}". This is a demo submission showing the worker script can handle research tasks.`,
+      agent: `ERC-8004 Agent #${AGENT_ID}`
+    };
+
+    const filename = `job-${jobId}-research.json`;
+    const filepath = join(outputDir, filename);
+    writeFileSync(filepath, JSON.stringify(report, null, 2));
+    console.log(`   📄 Generated report: ${filepath}`);
+    
+    const base64 = Buffer.from(JSON.stringify(report)).toString("base64");
+    return `data:application/json;base64,${base64}`;
+  }
+
+  // Default: return a generic completion proof
+  const proof = {
+    jobId: Number(jobId),
+    completedAt: new Date().toISOString(),
+    description: description,
+    result: "Task completed successfully",
+    agent: `ERC-8004 Agent #${AGENT_ID}`
+  };
+  const base64 = Buffer.from(JSON.stringify(proof)).toString("base64");
+  return `data:application/json;base64,${base64}`;
+}
+
+// ═══════════════════════════════════════════
+//              MAIN LOOP
+// ═══════════════════════════════════════════
+
+async function main() {
+  const chain = RPC_URL.includes("127.0.0.1") ? foundry : base;
+  const account = privateKeyToAccount(PRIVATE_KEY);
+  
+  const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });
+  const walletClient = createWalletClient({ account, chain, transport: http(RPC_URL) });
+
+  console.log(`\n🤖 Agent Bounty Board — Worker Agent`);
+  console.log(`═══════════════════════════════════════`);
+  console.log(`Agent Wallet:  ${account.address}`);
+  console.log(`Agent ID:      ${AGENT_ID} (ERC-8004)`);
+  console.log(`Board:         ${BOARD_ADDRESS}`);
+  console.log(`Max bid:       ${MAX_PRICE_FRACTION * 100}% of maxPrice`);
+  console.log();
+
+  const STATUS_NAMES = ["Open", "Claimed", "Submitted", "Completed", "Disputed", "Expired", "Cancelled"];
+  const processedJobs = new Set();
+
+  console.log(`👀 Scanning for jobs...\n`);
+
+  // Poll loop
+  while (true) {
+    try {
+      const jobCount = await publicClient.readContract({
+        address: BOARD_ADDRESS, abi: BOARD_ABI, functionName: "getJobCount"
+      });
+
+      for (let i = 0n; i < jobCount; i++) {
+        if (processedJobs.has(Number(i))) continue;
+
+        const [poster, description, minPrice, maxPrice, auctionStart, auctionDuration, workDeadline, status] = 
+          await publicClient.readContract({
+            address: BOARD_ADDRESS, abi: BOARD_ABI, functionName: "getJobCore", args: [i]
+          });
+
+        // Skip non-open jobs or jobs we posted
+        if (status !== 0) {
+          processedJobs.add(Number(i));
+          continue;
+        }
+
+        // Skip jobs we can't do
+        if (!canDoJob(description)) {
+          console.log(`   ⏭️  Job #${i}: "${description.slice(0, 50)}..." — not in my skill set`);
+          processedJobs.add(Number(i));
+          continue;
+        }
+
+        // Check price
+        const currentPrice = await publicClient.readContract({
+          address: BOARD_ADDRESS, abi: BOARD_ABI, functionName: "getCurrentPrice", args: [i]
+        });
+
+        const priceThreshold = (maxPrice * BigInt(Math.floor(MAX_PRICE_FRACTION * 100))) / 100n;
+        
+        if (currentPrice > priceThreshold) {
+          console.log(`   💸 Job #${i}: price ${formatEther(currentPrice)} CLAWD too high (max: ${formatEther(priceThreshold)})`);
+          continue; // Will check again next loop
+        }
+
+        // Claim the job!
+        console.log(`\n   🎯 Job #${i}: "${description.slice(0, 60)}..."`);
+        console.log(`   💰 Claiming at ${formatEther(currentPrice)} CLAWD`);
+
+        try {
+          const claimTx = await walletClient.writeContract({
+            address: BOARD_ADDRESS, abi: BOARD_ABI, functionName: "claimJob", args: [i, AGENT_ID]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: claimTx });
+          console.log(`   ✅ Claimed! TX: ${claimTx}`);
+
+          // Do the work
+          console.log(`   ⚙️  Working on job #${i}...`);
+          const submissionURI = await executeJob(i, description);
+
+          // Submit the work
+          console.log(`   📤 Submitting work...`);
+          const submitTx = await walletClient.writeContract({
+            address: BOARD_ADDRESS, abi: BOARD_ABI, functionName: "submitWork", args: [i, submissionURI]
+          });
+          await publicClient.waitForTransactionReceipt({ hash: submitTx });
+          console.log(`   ✅ Work submitted! TX: ${submitTx}`);
+          console.log(`   📦 URI: ${submissionURI.slice(0, 80)}...`);
+          console.log();
+
+          processedJobs.add(Number(i));
+        } catch (e) {
+          console.log(`   ❌ Failed to claim/submit job #${i}: ${e.message?.slice(0, 100)}`);
+          processedJobs.add(Number(i));
+        }
+      }
+    } catch (e) {
+      // Silently retry on RPC errors
+    }
+
+    // Wait before next scan
+    await new Promise(r => setTimeout(r, 3000));
+  }
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
