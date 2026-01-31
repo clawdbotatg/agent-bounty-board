@@ -1,20 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Address } from "@scaffold-ui/components";
 import { formatEther } from "viem";
 import { useAccount } from "wagmi";
-import { Address } from "@scaffold-ui/components";
 import { useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
-import {
-  JOB_STATUS_LABELS,
-  JOB_STATUS_COLORS,
-  formatTimeRemaining,
-} from "~~/utils/bountyBoard";
+import { JOB_STATUS_COLORS, JOB_STATUS_LABELS, formatTimeRemaining } from "~~/utils/bountyBoard";
 
-const JobDetailPage = () => {
-  const params = useParams();
-  const jobId = Number(params.id);
+const JobDetailInner = () => {
+  const searchParams = useSearchParams();
+  const jobId = Number(searchParams.get("id") || "0");
   const { address: connectedAddress } = useAccount();
 
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
@@ -48,7 +44,7 @@ const JobDetailPage = () => {
   });
 
   // Write hooks
-  const { writeContractAsync: writeBoard, isMining: isBoardMining } = useScaffoldWriteContract({
+  const { writeContractAsync: writeBoard } = useScaffoldWriteContract({
     contractName: "AgentBountyBoard",
   });
 
@@ -57,6 +53,14 @@ const JobDetailPage = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
   const [isDisputing, setIsDisputing] = useState(false);
+
+  if (!jobId) {
+    return (
+      <div className="flex justify-center items-center min-h-[50vh]">
+        <p className="text-lg opacity-60">No job ID specified. Add ?id=0 to the URL.</p>
+      </div>
+    );
+  }
 
   if (!jobCore) {
     return (
@@ -152,9 +156,7 @@ const JobDetailPage = () => {
         {/* Header */}
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-3xl font-bold">Job #{jobId}</h2>
-          <span className={`badge ${JOB_STATUS_COLORS[statusNum]} badge-lg`}>
-            {JOB_STATUS_LABELS[statusNum]}
-          </span>
+          <span className={`badge ${JOB_STATUS_COLORS[statusNum]} badge-lg`}>{JOB_STATUS_LABELS[statusNum]}</span>
         </div>
 
         {/* Main info card */}
@@ -162,10 +164,7 @@ const JobDetailPage = () => {
           <div className="card-body">
             <h3 className="text-lg font-semibold mb-2">Description</h3>
             <p className="text-base opacity-90 whitespace-pre-wrap">{description}</p>
-
             <div className="divider"></div>
-
-            {/* Poster */}
             <div className="flex items-center gap-2">
               <span className="font-semibold text-sm">Posted by:</span>
               <Address address={poster} />
@@ -178,7 +177,6 @@ const JobDetailPage = () => {
           <div className="card bg-base-300 shadow-xl mb-6">
             <div className="card-body">
               <h3 className="text-lg font-semibold mb-3">🏷️ Dutch Auction</h3>
-
               {isAuctionActive && currentPrice ? (
                 <>
                   <div className="bg-base-100 rounded-xl p-6 text-center">
@@ -187,7 +185,6 @@ const JobDetailPage = () => {
                       {parseFloat(formatEther(currentPrice)).toFixed(4)} CLAWD
                     </div>
                   </div>
-
                   <div className="grid grid-cols-3 gap-4 mt-4">
                     <div className="bg-base-100 rounded-lg p-3 text-center">
                       <div className="text-xs opacity-60">Max (Start)</div>
@@ -202,8 +199,6 @@ const JobDetailPage = () => {
                       <div className="font-semibold text-warning">{formatTimeRemaining(auctionTimeRemaining)}</div>
                     </div>
                   </div>
-
-                  {/* Progress bar */}
                   <div className="mt-4">
                     <progress
                       className="progress progress-primary w-full"
@@ -215,8 +210,6 @@ const JobDetailPage = () => {
                       <span>Min Price</span>
                     </div>
                   </div>
-
-                  {/* Claim section */}
                   <div className="divider">Claim This Job</div>
                   <div className="form-control">
                     <label className="label">
@@ -227,7 +220,7 @@ const JobDetailPage = () => {
                       className="input input-bordered bg-base-100"
                       placeholder="Enter your agent token ID"
                       value={agentIdInput}
-                      onChange={(e) => setAgentIdInput(e.target.value)}
+                      onChange={e => setAgentIdInput(e.target.value)}
                     />
                   </div>
                   <button
@@ -236,7 +229,9 @@ const JobDetailPage = () => {
                     disabled={isClaiming || !agentIdInput || !connectedAddress}
                   >
                     {isClaiming ? (
-                      <><span className="loading loading-spinner loading-sm"></span> Claiming...</>
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span> Claiming...
+                      </>
                     ) : (
                       `🤝 Claim for ${currentPrice ? parseFloat(formatEther(currentPrice)).toFixed(2) : "..."} CLAWD`
                     )}
@@ -256,7 +251,6 @@ const JobDetailPage = () => {
           <div className="card bg-base-300 shadow-xl mb-6">
             <div className="card-body">
               <h3 className="text-lg font-semibold mb-3">⚡ Work In Progress</h3>
-
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <div className="bg-base-100 rounded-lg p-4">
                   <div className="text-xs opacity-60 mb-1">Assigned Agent</div>
@@ -270,7 +264,6 @@ const JobDetailPage = () => {
                   </div>
                 </div>
               </div>
-
               {isAgent && (
                 <>
                   <div className="divider">Submit Your Work</div>
@@ -283,7 +276,7 @@ const JobDetailPage = () => {
                       className="input input-bordered bg-base-100"
                       placeholder="ipfs://... or https://..."
                       value={submissionURI}
-                      onChange={(e) => setSubmissionURI(e.target.value)}
+                      onChange={e => setSubmissionURI(e.target.value)}
                     />
                   </div>
                   <button
@@ -292,7 +285,9 @@ const JobDetailPage = () => {
                     disabled={isSubmitting || !submissionURI}
                   >
                     {isSubmitting ? (
-                      <><span className="loading loading-spinner loading-sm"></span> Submitting...</>
+                      <>
+                        <span className="loading loading-spinner loading-sm"></span> Submitting...
+                      </>
                     ) : (
                       "📤 Submit Work"
                     )}
@@ -308,7 +303,6 @@ const JobDetailPage = () => {
           <div className="card bg-base-300 shadow-xl mb-6">
             <div className="card-body">
               <h3 className="text-lg font-semibold mb-3">📋 Work Submitted — Awaiting Review</h3>
-
               <div className="bg-base-100 rounded-lg p-4 mb-4">
                 <div className="text-xs opacity-60 mb-1">Submission URI</div>
                 <a
@@ -320,13 +314,11 @@ const JobDetailPage = () => {
                   {jobSubmissionURI}
                 </a>
               </div>
-
               <div className="bg-base-100 rounded-lg p-4 mb-4">
                 <div className="text-xs opacity-60 mb-1">Agent</div>
                 <Address address={agent} />
                 <div className="text-xs mt-1 opacity-60">Agent ID: #{agentId}</div>
               </div>
-
               {isPoster && (
                 <>
                   <div className="divider">Review Work</div>
@@ -335,7 +327,7 @@ const JobDetailPage = () => {
                       <span className="label-text">Rating (1-5)</span>
                     </label>
                     <div className="rating rating-lg">
-                      {[1, 2, 3, 4, 5].map((r) => (
+                      {[1, 2, 3, 4, 5].map(r => (
                         <input
                           key={r}
                           type="radio"
@@ -348,24 +340,20 @@ const JobDetailPage = () => {
                     </div>
                   </div>
                   <div className="flex gap-3">
-                    <button
-                      className="btn btn-success flex-1"
-                      onClick={handleApproveWork}
-                      disabled={isApproving}
-                    >
+                    <button className="btn btn-success flex-1" onClick={handleApproveWork} disabled={isApproving}>
                       {isApproving ? (
-                        <><span className="loading loading-spinner loading-sm"></span> Approving...</>
+                        <>
+                          <span className="loading loading-spinner loading-sm"></span> Approving...
+                        </>
                       ) : (
                         "✅ Approve Work"
                       )}
                     </button>
-                    <button
-                      className="btn btn-error flex-1"
-                      onClick={handleDispute}
-                      disabled={isDisputing}
-                    >
+                    <button className="btn btn-error flex-1" onClick={handleDispute} disabled={isDisputing}>
                       {isDisputing ? (
-                        <><span className="loading loading-spinner loading-sm"></span> Disputing...</>
+                        <>
+                          <span className="loading loading-spinner loading-sm"></span> Disputing...
+                        </>
                       ) : (
                         "❌ Dispute"
                       )}
@@ -382,7 +370,6 @@ const JobDetailPage = () => {
           <div className="card bg-base-300 shadow-xl mb-6">
             <div className="card-body">
               <h3 className="text-lg font-semibold mb-3">✅ Job Completed</h3>
-
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-base-100 rounded-lg p-4">
                   <div className="text-xs opacity-60 mb-1">Agent</div>
@@ -396,11 +383,10 @@ const JobDetailPage = () => {
                   </div>
                 </div>
               </div>
-
               <div className="bg-base-100 rounded-lg p-4 mt-4">
                 <div className="text-xs opacity-60 mb-1">Rating</div>
                 <div className="rating rating-md">
-                  {[1, 2, 3, 4, 5].map((r) => (
+                  {[1, 2, 3, 4, 5].map(r => (
                     <input
                       key={r}
                       type="radio"
@@ -412,7 +398,6 @@ const JobDetailPage = () => {
                   ))}
                 </div>
               </div>
-
               {jobSubmissionURI && (
                 <div className="bg-base-100 rounded-lg p-4 mt-4">
                   <div className="text-xs opacity-60 mb-1">Submission</div>
@@ -442,7 +427,12 @@ const JobDetailPage = () => {
               {jobSubmissionURI && (
                 <div className="bg-base-100 rounded-lg p-4 mt-4">
                   <div className="text-xs opacity-60 mb-1">Submission</div>
-                  <a href={jobSubmissionURI} target="_blank" rel="noopener noreferrer" className="link link-primary break-all">
+                  <a
+                    href={jobSubmissionURI}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="link link-primary break-all"
+                  >
                     {jobSubmissionURI}
                   </a>
                 </div>
@@ -479,6 +469,20 @@ const JobDetailPage = () => {
         </div>
       </div>
     </div>
+  );
+};
+
+const JobDetailPage = () => {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex justify-center items-center min-h-[50vh]">
+          <span className="loading loading-spinner loading-lg"></span>
+        </div>
+      }
+    >
+      <JobDetailInner />
+    </Suspense>
   );
 };
 

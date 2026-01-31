@@ -46,7 +46,7 @@ const JobCard = ({ jobId }: { jobId: number }) => {
   const isAuctionActive = statusNum === 0 && auctionTimeRemaining > 0;
 
   return (
-    <Link href={`/job/${jobId}`}>
+    <Link href={`/job?id=${jobId}`}>
       <div className="card bg-base-300 shadow-xl hover:shadow-2xl transition-all cursor-pointer h-full">
         <div className="card-body p-5">
           {/* Header row */}
