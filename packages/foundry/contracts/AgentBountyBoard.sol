@@ -4,6 +4,8 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title AgentBountyBoard
@@ -12,11 +14,27 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *      First agent to claim gets the job at the current price.
  *      Agent submits work, poster approves or disputes.
  *      CLAWD token is used for all payments (escrow model).
+ *      
+ *      IMPROVEMENTS: Added ERC-8004 on-chain verification, Pausable, Ownable,
+ *      custom errors for gas savings, and enhanced security.
  */
-contract AgentBountyBoard is ReentrancyGuard {
+contract AgentBountyBoard is ReentrancyGuard, Ownable, Pausable {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable clawd;
+    
+    // ERC-8004 Agent Registry address (Ethereum mainnet)
+    // This contract verifies agents are properly registered
+    address public agentRegistry;
+    
+    // Max fee percentage that can be charged (5%)
+    uint256 public constant MAX_FEE_BPS = 500;
+    uint256 public constant BPS = 10000;
+    
+    // Protocol fee (0% initially, can be set by owner up to MAX_FEE_BPS)
+    uint256 public protocolFeeBps;
+    address public feeRecipient;
+    uint256 public totalFeesCollected;
 
     enum JobStatus {
         Open,       // Auction running, waiting for an agent to claim
@@ -50,10 +68,40 @@ contract AgentBountyBoard is ReentrancyGuard {
         uint256 disputedJobs;
         uint256 totalEarned;
         uint256 totalRating;      // Sum of all ratings (divide by completedJobs for avg)
+        uint256 firstJobTimestamp; // When agent did first job (for seniority)
     }
+    
+    // Whitelist for verified agent owners (optional access control)
+    mapping(address => bool) public verifiedAgentOwners;
+    
+    // Cumulative platform stats
+    uint256 public totalJobsPosted;
+    uint256 public totalJobsCompleted;
+    uint256 public totalCLAWDPaid;
+    uint256 public totalDisputes;
 
     Job[] public jobs;
     mapping(address => AgentStats) public agentStats;
+
+    // Custom Errors (gas savings vs require strings)
+    error InvalidAddress();
+    error InvalidPrice();
+    error InvalidDuration();
+    error EmptyDescription();
+    error JobNotOpen();
+    error JobNotClaimed();
+    error JobNotSubmitted();
+    error PosterCannotClaimOwnJob();
+    error OnlyPoster();
+    error OnlyAssignedAgent();
+    error WorkDeadlinePassed();
+    error DeadlineNotPassed();
+    error ReviewPeriodNotOver();
+    error InvalidRating();
+    error AgentNotRegistered();
+    error RegistryNotSet();
+    error FeeTooHigh();
+    error TransferFailed();
 
     // Events
     event JobPosted(
@@ -69,17 +117,115 @@ contract AgentBountyBoard is ReentrancyGuard {
         uint256 indexed jobId,
         address indexed agent,
         uint256 agentId,
-        uint256 paidAmount
+        uint256 paidAmount,
+        uint256 currentPrice
     );
     event WorkSubmitted(uint256 indexed jobId, string submissionURI);
-    event WorkApproved(uint256 indexed jobId, uint8 rating, uint256 paidAmount);
-    event WorkDisputed(uint256 indexed jobId);
+    event WorkApproved(uint256 indexed jobId, uint8 rating, uint256 paidAmount, uint256 fee);
+    event WorkDisputed(uint256 indexed jobId, address indexed agent);
     event JobCancelled(uint256 indexed jobId);
-    event JobExpired(uint256 indexed jobId);
+    event JobExpired(uint256 indexed jobId, address indexed agent);
+    event AgentRegistered(address indexed agentAddress, uint256 indexed agentId);
+    event RegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event ProtocolFeeUpdated(uint256 oldFee, uint256 newFee);
+    event FeeRecipientUpdated(address oldRecipient, address newRecipient);
+    event FeesWithdrawn(address indexed recipient, uint256 amount);
 
-    constructor(address _clawd) {
-        require(_clawd != address(0), "Invalid CLAWD address");
+    constructor(address _clawd, address _agentRegistry) Ownable(msg.sender) {
+        if (_clawd == address(0)) revert InvalidAddress();
         clawd = IERC20(_clawd);
+        agentRegistry = _agentRegistry;
+        feeRecipient = msg.sender;
+    }
+
+    // ═══════════════════════════════════════════
+    //                  ADMIN FUNCTIONS
+    // ═══════════════════════════════════════════
+    
+    /**
+     * @notice Update the ERC-8004 agent registry address
+     * @param _agentRegistry New registry address
+     */
+    function setAgentRegistry(address _agentRegistry) external onlyOwner {
+        if (_agentRegistry == address(0)) revert InvalidAddress();
+        address oldRegistry = agentRegistry;
+        agentRegistry = _agentRegistry;
+        emit RegistryUpdated(oldRegistry, _agentRegistry);
+    }
+    
+    /**
+     * @notice Set protocol fee percentage (max 5%)
+     * @param _feeBps Fee in basis points (100 = 1%)
+     */
+    function setProtocolFee(uint256 _feeBps) external onlyOwner {
+        if (_feeBps > MAX_FEE_BPS) revert FeeTooHigh();
+        uint256 oldFee = protocolFeeBps;
+        protocolFeeBps = _feeBps;
+        emit ProtocolFeeUpdated(oldFee, _feeBps);
+    }
+    
+    /**
+     * @notice Set fee recipient address
+     * @param _recipient Address to receive fees
+     */
+    function setFeeRecipient(address _recipient) external onlyOwner {
+        if (_recipient == address(0)) revert InvalidAddress();
+        address oldRecipient = feeRecipient;
+        feeRecipient = _recipient;
+        emit FeeRecipientUpdated(oldRecipient, _recipient);
+    }
+    
+    /**
+     * @notice Add verified agent owner (optional whitelist)
+     * @param _agentOwner Agent owner address to verify
+     */
+    function verifyAgentOwner(address _agentOwner) external onlyOwner {
+        if (_agentOwner == address(0)) revert InvalidAddress();
+        verifiedAgentOwners[_agentOwner] = true;
+    }
+    
+    /**
+     * @notice Remove verified agent owner
+     * @param _agentOwner Agent owner address to remove
+     */
+    function revokeAgentOwner(address _agentOwner) external onlyOwner {
+        verifiedAgentOwners[_agentOwner] = false;
+    }
+    
+    /**
+     * @notice Emergency pause - only owner
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+    
+    /**
+     * @notice Unpause - only owner
+     */
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+    
+    /**
+     * @notice Recover stuck tokens (non-CLAWD) - only owner
+     * @param token The token to recover
+     */
+    function recoverStuckTokens(address token) external onlyOwner {
+        if (token == address(clawd)) revert InvalidAddress();
+        IERC20 stuckToken = IERC20(token);
+        uint256 balance = stuckToken.balanceOf(address(this));
+        stuckToken.safeTransfer(owner(), balance);
+    }
+    
+    /**
+     * @notice Withdraw accumulated protocol fees
+     */
+    function withdrawFees() external onlyOwner {
+        uint256 amount = totalFeesCollected;
+        if (amount == 0) revert TransferFailed();
+        totalFeesCollected = 0;
+        clawd.safeTransfer(feeRecipient, amount);
+        emit FeesWithdrawn(feeRecipient, amount);
     }
 
     // ═══════════════════════════════════════════
@@ -101,12 +247,12 @@ contract AgentBountyBoard is ReentrancyGuard {
         uint256 maxPrice,
         uint256 auctionDuration,
         uint256 workDeadline
-    ) external nonReentrant returns (uint256 jobId) {
-        require(maxPrice > 0, "Max price must be > 0");
-        require(maxPrice >= minPrice, "Max must be >= min");
-        require(auctionDuration > 0, "Auction duration must be > 0");
-        require(workDeadline > 0, "Work deadline must be > 0");
-        require(bytes(description).length > 0, "Description required");
+    ) external nonReentrant whenNotPaused returns (uint256 jobId) {
+        if (maxPrice == 0) revert InvalidPrice();
+        if (maxPrice < minPrice) revert InvalidPrice();
+        if (auctionDuration == 0) revert InvalidDuration();
+        if (workDeadline == 0) revert InvalidDuration();
+        if (bytes(description).length == 0) revert EmptyDescription();
 
         // Transfer maxPrice CLAWD from poster as escrow
         clawd.safeTransferFrom(msg.sender, address(this), maxPrice);
@@ -128,6 +274,8 @@ contract AgentBountyBoard is ReentrancyGuard {
             rating: 0,
             status: JobStatus.Open
         }));
+        
+        unchecked { totalJobsPosted++; }
 
         emit JobPosted(jobId, msg.sender, description, minPrice, maxPrice, auctionDuration, workDeadline);
     }
@@ -137,55 +285,75 @@ contract AgentBountyBoard is ReentrancyGuard {
      * @param jobId The job to approve
      * @param rating Quality rating 0-100
      */
-    function approveWork(uint256 jobId, uint8 rating) external nonReentrant {
+    function approveWork(uint256 jobId, uint8 rating) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(msg.sender == job.poster, "Only poster can approve");
-        require(job.status == JobStatus.Submitted, "Job not submitted");
-        require(rating <= 100, "Rating must be 0-100");
+        if (msg.sender != job.poster) revert OnlyPoster();
+        if (job.status != JobStatus.Submitted) revert JobNotSubmitted();
+        if (rating > 100) revert InvalidRating();
 
         job.status = JobStatus.Completed;
         job.rating = rating;
 
+        // Calculate fee
+        uint256 fee = (job.paidAmount * protocolFeeBps) / BPS;
+        uint256 agentPayment = job.paidAmount - fee;
+        
+        if (fee > 0) {
+            totalFeesCollected += fee;
+        }
+
         // Update agent stats
         AgentStats storage stats = agentStats[job.agent];
         stats.completedJobs++;
-        stats.totalEarned += job.paidAmount;
+        stats.totalEarned += agentPayment;
         stats.totalRating += rating;
+        if (stats.firstJobTimestamp == 0) {
+            stats.firstJobTimestamp = block.timestamp;
+        }
+        
+        // Update platform stats
+        unchecked {
+            totalJobsCompleted++;
+            totalCLAWDPaid += agentPayment;
+        }
 
         // Pay the agent
-        clawd.safeTransfer(job.agent, job.paidAmount);
+        clawd.safeTransfer(job.agent, agentPayment);
 
-        emit WorkApproved(jobId, rating, job.paidAmount);
+        emit WorkApproved(jobId, rating, agentPayment, fee);
     }
 
     /**
      * @notice Dispute submitted work — refund escrow to poster
      * @param jobId The job to dispute
      */
-    function disputeWork(uint256 jobId) external nonReentrant {
+    function disputeWork(uint256 jobId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(msg.sender == job.poster, "Only poster can dispute");
-        require(job.status == JobStatus.Submitted, "Job not submitted");
+        if (msg.sender != job.poster) revert OnlyPoster();
+        if (job.status != JobStatus.Submitted) revert JobNotSubmitted();
 
         job.status = JobStatus.Disputed;
 
         // Update agent stats
         agentStats[job.agent].disputedJobs++;
+        
+        // Update platform stats
+        unchecked { totalDisputes++; }
 
         // Refund the escrowed amount to poster
         clawd.safeTransfer(job.poster, job.paidAmount);
 
-        emit WorkDisputed(jobId);
+        emit WorkDisputed(jobId, job.agent);
     }
 
     /**
      * @notice Cancel an open job (only if unclaimed)
      * @param jobId The job to cancel
      */
-    function cancelJob(uint256 jobId) external nonReentrant {
+    function cancelJob(uint256 jobId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(msg.sender == job.poster, "Only poster can cancel");
-        require(job.status == JobStatus.Open, "Job not open");
+        if (msg.sender != job.poster) revert OnlyPoster();
+        if (job.status != JobStatus.Open) revert JobNotOpen();
 
         job.status = JobStatus.Cancelled;
 
@@ -202,12 +370,32 @@ contract AgentBountyBoard is ReentrancyGuard {
     /**
      * @notice Claim an open job at the current Dutch auction price
      * @param jobId The job to claim
-     * @param agentId The agent's ERC-8004 ID (verified client-side)
+     * @param agentId The agent's ERC-8004 ID (verified on-chain if registry set)
      */
-    function claimJob(uint256 jobId, uint256 agentId) external nonReentrant {
+    function claimJob(uint256 jobId, uint256 agentId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(job.status == JobStatus.Open, "Job not open");
-        require(msg.sender != job.poster, "Poster cannot claim own job");
+        if (job.status != JobStatus.Open) revert JobNotOpen();
+        if (msg.sender == job.poster) revert PosterCannotClaimOwnJob();
+        
+        // Optional: Verify agent is registered in ERC-8004
+        // If registry is set, verify the agent exists
+        if (agentRegistry != address(0)) {
+            // ERC-8004 interface: agents(uint256) returns (address owner, bytes32 metadataURI, bool active)
+            (bool success, bytes memory result) = agentRegistry.staticcall(
+                abi.encodeWithSignature("agents(uint256)", agentId)
+            );
+            if (!success || result.length < 32) revert AgentNotRegistered();
+            
+            // Decode owner address (first 32 bytes)
+            address agentOwner = abi.decode(result, (address));
+            if (agentOwner == address(0)) revert AgentNotRegistered();
+            
+            // Verify the sender owns this agent
+            // Allow verified agent owners (for multi-sig or contract wallets)
+            if (agentOwner != msg.sender && !verifiedAgentOwners[msg.sender]) {
+                revert AgentNotRegistered();
+            }
+        }
 
         uint256 currentPrice = _getCurrentPrice(job);
 
@@ -223,35 +411,52 @@ contract AgentBountyBoard is ReentrancyGuard {
             clawd.safeTransfer(job.poster, refund);
         }
 
-        emit JobClaimed(jobId, msg.sender, agentId, currentPrice);
+        emit JobClaimed(jobId, msg.sender, agentId, currentPrice, currentPrice);
     }
 
     /**
      * @notice Reclaim funds if poster never responds to submission
-     * @dev Agent can reclaim after 2x the work deadline passes from submission
+     * @dev Agent can reclaim after 3x the work deadline passes from submission
      * @param jobId The job to reclaim
      */
-    function reclaimWork(uint256 jobId) external nonReentrant {
+    function reclaimWork(uint256 jobId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(msg.sender == job.agent, "Only assigned agent");
-        require(job.status == JobStatus.Submitted, "Job not submitted");
-        // Allow reclaim after 2x the work deadline from when it was claimed
+        if (msg.sender != job.agent) revert OnlyAssignedAgent();
+        if (job.status != JobStatus.Submitted) revert JobNotSubmitted();
+        // Allow reclaim after 3x the work deadline from when it was claimed
         // This gives poster ample time to review
         uint256 reviewDeadline = job.claimedAt + (job.workDeadline * 3);
-        require(block.timestamp > reviewDeadline, "Review period not over");
+        if (block.timestamp <= reviewDeadline) revert ReviewPeriodNotOver();
 
         job.status = JobStatus.Completed;
         job.rating = 0; // No rating for auto-reclaim
 
+        // Calculate fee
+        uint256 fee = (job.paidAmount * protocolFeeBps) / BPS;
+        uint256 agentPayment = job.paidAmount - fee;
+        
+        if (fee > 0) {
+            totalFeesCollected += fee;
+        }
+
         // Update agent stats (counts as completed but no rating boost)
         AgentStats storage stats = agentStats[job.agent];
         stats.completedJobs++;
-        stats.totalEarned += job.paidAmount;
+        stats.totalEarned += agentPayment;
+        if (stats.firstJobTimestamp == 0) {
+            stats.firstJobTimestamp = block.timestamp;
+        }
+        
+        // Update platform stats
+        unchecked {
+            totalJobsCompleted++;
+            totalCLAWDPaid += agentPayment;
+        }
 
         // Pay the agent
-        clawd.safeTransfer(job.agent, job.paidAmount);
+        clawd.safeTransfer(job.agent, agentPayment);
 
-        emit WorkApproved(jobId, 0, job.paidAmount);
+        emit WorkApproved(jobId, 0, agentPayment, fee);
     }
 
     /**
@@ -259,15 +464,12 @@ contract AgentBountyBoard is ReentrancyGuard {
      * @param jobId The job to submit work for
      * @param submissionURI URI pointing to the work (IPFS, https, etc.)
      */
-    function submitWork(uint256 jobId, string calldata submissionURI) external nonReentrant {
+    function submitWork(uint256 jobId, string calldata submissionURI) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(msg.sender == job.agent, "Only assigned agent");
-        require(job.status == JobStatus.Claimed, "Job not claimed");
-        require(bytes(submissionURI).length > 0, "Submission URI required");
-        require(
-            block.timestamp <= job.claimedAt + job.workDeadline,
-            "Work deadline passed"
-        );
+        if (msg.sender != job.agent) revert OnlyAssignedAgent();
+        if (job.status != JobStatus.Claimed) revert JobNotClaimed();
+        if (bytes(submissionURI).length == 0) revert EmptyDescription();
+        if (block.timestamp > job.claimedAt + job.workDeadline) revert WorkDeadlinePassed();
 
         job.status = JobStatus.Submitted;
         job.submissionURI = submissionURI;
@@ -284,20 +486,17 @@ contract AgentBountyBoard is ReentrancyGuard {
      * @dev Anyone can call this to clean up expired jobs
      * @param jobId The job to expire
      */
-    function expireJob(uint256 jobId) external nonReentrant {
+    function expireJob(uint256 jobId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
-        require(job.status == JobStatus.Claimed, "Job not in claimed state");
-        require(
-            block.timestamp > job.claimedAt + job.workDeadline,
-            "Deadline not yet passed"
-        );
+        if (job.status != JobStatus.Claimed) revert JobNotClaimed();
+        if (block.timestamp <= job.claimedAt + job.workDeadline) revert DeadlineNotPassed();
 
         job.status = JobStatus.Expired;
 
         // Refund escrowed amount to poster (agent failed to deliver)
         clawd.safeTransfer(job.poster, job.paidAmount);
 
-        emit JobExpired(jobId);
+        emit JobExpired(jobId, job.agent);
     }
 
     // ═══════════════════════════════════════════
@@ -310,7 +509,7 @@ contract AgentBountyBoard is ReentrancyGuard {
      * @return The current price in CLAWD (wei)
      */
     function getCurrentPrice(uint256 jobId) external view returns (uint256) {
-        require(jobId < jobs.length, "Job does not exist");
+        if (jobId >= jobs.length) revert InvalidAddress();
         return _getCurrentPrice(jobs[jobId]);
     }
 
@@ -366,13 +565,30 @@ contract AgentBountyBoard is ReentrancyGuard {
         uint256 completedJobs,
         uint256 disputedJobs,
         uint256 totalEarned,
-        uint256 avgRating
+        uint256 avgRating,
+        uint256 seniorityDays
     ) {
         AgentStats storage stats = agentStats[agent];
         uint256 avg = stats.completedJobs > 0
             ? stats.totalRating / stats.completedJobs
             : 0;
-        return (stats.completedJobs, stats.disputedJobs, stats.totalEarned, avg);
+        uint256 seniority = stats.firstJobTimestamp > 0
+            ? (block.timestamp - stats.firstJobTimestamp) / 1 days
+            : 0;
+        return (stats.completedJobs, stats.disputedJobs, stats.totalEarned, avg, seniority);
+    }
+    
+    /**
+     * @notice Get platform-wide statistics
+     */
+    function getPlatformStats() external view returns (
+        uint256 jobsPosted,
+        uint256 jobsCompleted,
+        uint256 totalPaid,
+        uint256 disputes,
+        uint256 feeBalance
+    ) {
+        return (totalJobsPosted, totalJobsCompleted, totalCLAWDPaid, totalDisputes, totalFeesCollected);
     }
 
     // ═══════════════════════════════════════════
